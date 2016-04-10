@@ -1,0 +1,311 @@
+---
+title: "Classification of Body Movements during Weight Lifting Exercises"
+author: "Dmitry Belyaev"
+date: "10 April 2016"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+## 1. Introduction
+
+This course project is devoted to the Human Activity Recognition (HAR) problems in the sphere of development of the digital assistants for weight lifting exercises and based on the research of using accelerometers for classification of body postures and movements (Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012 - http://groupware.les.inf.puc-rio.br/har).
+
+The goal of the project is to predict the manner in which people do the exercises with free weights. 
+
+## 2. Data Analysis and Feature Selection
+
+```{r, warning = FALSE, message = FALSE}
+library(caret)
+set.seed(314159)
+```
+
+### 2.1. Exploring the Datasets
+
+The source dataset was downloaded using the links supplied in the course project task:
+
+* the training dataset - https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+* the test dataset - https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+```{r, warning = FALSE, message = FALSE}
+raw_train <- read.csv("./PML_CP_Data/pml-training.csv", row.names = 1)
+raw_test <- read.csv("./PML_CP_Data/pml-testing.csv", row.names = 1)
+```
+
+Training dataset contains **`r dim(raw_train)[1]` observations** and **`r dim(raw_train)[2]` variables** describing the Unilateral Dumbbell Biceps Curl exercises performed by six male participants of experiment. They were asked to perform sets of 10 repetitions in 5 different fashions (variable *classe*):
+
+```{r, warning = FALSE, message = FALSE}
+table(raw_train$classe)
+```
+
+* A - exactly according to the specification;
+* B - with throwing the elbows to the front;
+* C - with lifting the dumbbell only halfway;
+* D - with lowering the dumbbell only halfway;
+* E - with throwing the hips to the front.
+
+Class A corresponds to the proper execution of the exercise, and other classes correspond to common mistakes.
+
+Other variables describe:
+
+* attributes and conditions of observations (6 variables *user_name*, *raw_timestamp_part_1*, *raw_timestamp_part_2*, *cvtd_timestamp*, *new_window*, and *num_window*);
+* measurements obtained from sensors placed on the participant’s belt, arm, forearm, and dumbbell (`r length(grep("_(belt|forearm|arm|dumbbell)|classe", names(raw_train)))` variables with corresponding suffixes “\_belt”, “\_arm”, “\_forearm”, and “\_dumbbell”).
+
+The testing dataset includes **`r dim(raw_test)[1]` observations** with the same set of variables as in the training one except the variable “classe” which should be predicted.
+
+### 2.2. Choosing of Predictors
+
+As it was mentioned above, both datasets contain variables which don’t relate directly to the way of performing the physical exercises. For example, the variable participant could be important because different people doing the same exercises in a unique way. On the other hand, mistakes occurring during exercises must be recognized regardless of person performing the exercises. 
+
+Therefore, only the variables with numerical measurements obtained from sensors was left as the predictors:
+
+```{r, warning = FALSE, message = FALSE}
+sensors_train <- grep("_(belt|forearm|arm|dumbbell)|classe",
+                      names(raw_train))
+sensors_test <- grep("_(belt|forearm|arm|dumbbell)",
+                     names(raw_test))
+
+names(raw_train)[setdiff(sensors_train, sensors_test)]
+raw_train <- raw_train[, sensors_train]
+raw_test <- raw_test[, sensors_test]
+
+numeric_cols <- sapply(raw_train, is.numeric)
+raw_test <- raw_test[, numeric_cols]
+numeric_cols["classe"] = TRUE
+raw_train <- raw_train[, numeric_cols]
+```
+
+### 2.3. Cleaning the Raw Data
+
+Exploratory datasets analysis has shown that a number of data variables include empty values, NAs and signs of calculating error (“#DIV/0!”).
+
+There are many different ways to deal with the gaps in a raw data. Sometimes it’s possible to replace the gaps in raw data, but in our case the amount of gaps is quite big. In the traning dataset 67 variables with gaps have less then 3% of informative observations:
+
+```{r, warning = FALSE, message = FALSE}
+na_vars <- apply(raw_train, 2, function(x) { sum(is.na(x)) })
+na_vars <- round(100 * na_vars[na_vars > 0.97] / dim(raw_train)[1], 1)
+names(na_vars)
+```
+
+In this case filling the gaps by constant values (zeros, means e t.c.) will enlarge the data collinearity which can lead to an increase of the classification errors.
+
+Considering the above, all variables with gaps and errors were excluded of the training and testing datasets:
+
+```{r, warning = FALSE, message = FALSE}
+na_cols <- colSums(is.na(raw_train)) == 0
+tidy_train <- raw_train[, na_cols]
+na_cols <- na_cols[names(na_cols) != "classe"]
+tidy_test <- raw_test[, na_cols]
+
+tidy_train$classe <- as.factor(tidy_train$classe)
+```
+
+## 3. Model Selection and Tuning
+
+In order to select the multiclass classification model next type of classifiers was tuned and fitted:
+
+* Support Vector Machine classifiers (“svmRadial”) ;
+* Random Forest classifier ("rf");
+* Gradient Boosting Trees classifier ("gbm").
+
+### 3.1. Training and Testing Datasets 
+
+To prepare the training dataset to the process of tuning and fitting classifiers it was split into *training* and *testing* datasets with sizes of 75% and 25% respectively:
+
+```{r, warning = FALSE, message = FALSE}
+in_train <- createDataPartition(y = tidy_train$classe, p = 0.75, list = FALSE)
+training <- tidy_train[in_train, ]
+testing <- tidy_train[-in_train, ]
+```
+
+(Note: now we have two datasets for testing routines on different stages:
+
+* *testing* dataset was used to model selection and tuning;
+* *tidy_test* dataset was used to final classification.)
+
+### 3.2. Cross-validation parameters
+
+Tuning of the parameters of each model was made by the K-fold Cross-Validation with K=5:
+
+```{r, warning = FALSE, message = FALSE}
+fit_control <- trainControl(
+        method = "cv",
+        number = 5,
+        verboseIter = FALSE)
+```
+
+### 3.2. Fitting classifiers 
+
+The training function was used to evaluate the effect of model tuning parameters on classification performance (to choose “the best” model parameters) and estimate the model performance on the training set.
+
+#### 3.2.1. Support Vector Machine
+
+The grid of parameters for Support Vector Machine classifier includes the next parameters and their values:
+
+* cost parameter C -  0.25, 0.5, 1, 2, 4, 8, 16, 32;
+* kernel parameter $\sigma$ - 0.001, 0.01, 0.1.
+
+```{r fit_svm, warning = FALSE, message = FALSE, cache=TRUE}
+svm_grid <- expand.grid(C = c(0.25, 0.5, 1, 2, 4, 8, 16, 32),
+                        sigma = c(0.001, 0.01, 0.1)
+)
+
+fit_svm <- train(classe ~ ., data = training,
+                 method = "svmRadial",
+                 trControl = fit_control,
+                 tuneGrid = svm_grid,
+                 preProc = c("center", "scale"),
+                 verbose = FALSE)
+```
+
+Values "Accuracy" and “Kappa” are the overall agreement rate and Cohen's (unweighted) Kappa statistic respectively averaged over cross-validation iterations.
+
+```{r, warning = FALSE, message = FALSE}
+fit_svm
+ggplot(fit_svm)
+```
+
+As you can see, the best model parameters (among the parameter in the grid) are C = 0.1 and $\sigma$ = 32. They provide the **0.9976 level of accuracy** on the testing dataset:
+
+```{r, warning = FALSE, message = FALSE}
+test_predict_svm <- predict(fit_svm, testing)
+confusionMatrix(test_predict_svm, testing$classe)
+```
+
+#### 3.2.2. Random Forest Classifier
+
+The grid of parameters for Random Forest classifier includes only one parameter which can be tuned - the number of randomly selected predictors *mtry* = 2, 4, 8, 16, …, up to the total number of predictors. (It is strange that the forest size - the "number of trees to grow" can't be tuned.)
+
+```{r fit_rf, warning = FALSE, message = FALSE, cache=TRUE}
+rf_grid <- expand.grid(mtry = c(2, 4, 8, 16, 32, dim(training)[2]))
+
+fit_rf <- train(classe ~ ., data = training,
+                method = "rf",
+                trControl = fit_control,
+                tuneGrid = rf_grid)
+```
+
+The best model parameter *mtry* is equal to 16:
+
+```{r, warning = FALSE, message = FALSE}
+fit_rf
+ggplot(fit_rf)
+```
+
+It provides the **0.9947 level of accuracy** on the testing dataset:
+
+```{r, warning = FALSE, message = FALSE}
+test_predict_rf <- predict(fit_rf, testing)
+confusionMatrix(test_predict_rf, testing$classe)
+```
+
+#### 3.2.3. Gradient Boosting Classifier
+
+The grid of parameters for Gradient Boosting classifier includes the next parameters and their values:
+- boosting iterations (number of trees) = 5, 10, 15, …, 100;
+- maximum tree depth - 1, 5, 10, 15.
+
+Other parameters available for tuning was taken as default constants (shrinkage = 0.1, terminal node size = 20) for reasons of cross-validation and fitting time reduction.
+
+```{r fit_gbm, warning = FALSE, message = FALSE, cache=TRUE}
+gbm_grid <- expand.grid(interaction.depth = c(1, 5, 10, 15),
+                        n.trees = (1:20) * 5,
+                        shrinkage = 0.1,
+                        n.minobsinnode = 20)
+
+fit_gbm <- train(classe ~ ., data = training,
+                 method = "gbm",
+                 trControl = fit_control,
+                 tuneGrid = gbm_grid,
+                 verbose = FALSE)
+```
+
+The best model parameters (among the tuning parameter grid) are interection.depth = 15, n.trees = 100:
+
+```{r, warning = FALSE, message = FALSE}
+fit_gbm
+ggplot(fit_gbm)
+```
+
+They provide the **0.9947 level of accuracy** on the testing dataset:
+
+```{r, warning = FALSE, message = FALSE}
+test_predict_gbm <- predict(fit_gbm, testing)
+confusionMatrix(test_predict_gbm, testing$classe)
+```
+
+As we can see, Accuracy of Gradient Boosting model increases monotonically with the number of trees, which demonstrates the ability to improve the generalization abilities with increasing of model complexity. The greatest value of Accuracy was obtained on the right border of the considered interval with the number of trees equal to 100.
+
+Thus, if it is necessary to increase the accuracy of the model, it is possible to increase the number of trees and maximum tree depth. However, the quality of the growth rate slows down. It can lead to a dramatic increase in computing time and cost of training patterns.
+
+### 3.4. Model comparison
+
+On the testing data Support Vector Machine classifier showed the best accurasy - 0.9976 (12 mistakes per 4904 ovservations), while two other models - Random Forest and Gradient Boosting - reached the same lavel of 0.9947 accuracy (26 mistakes per 4904 observations).
+
+At the same time, on the cross-validation tests Random Forest reached the better accuracy then Gradient Boosting:
+
+```{r, warning = FALSE, message = FALSE}
+resamps <- resamples(list(GBM = fit_gbm,
+                          SVM = fit_svm,
+                          RF = fit_rf))
+summary(resamps)
+bwplot(resamps, layout = c(2, 1))
+```
+
+```{r, warning = FALSE, message = FALSE}
+diffs <- diff(resamps)
+bwplot(diffs, layout = c(2, 1))
+```
+
+It should be noted, that this calculating experiment was performed on the fitting parameters combined with a sufficiently large steps. Therefore, the choice of fitting parameters was not made quite accurate.
+
+Furthermore, as it was shown above: Gradient Boosting model can be fitted much better if more computational resouces are present.
+
+## 4. Fitting the final models and final classification
+
+The final model was fitted on the full training dataset (*tidy_train*) with the best parameters obtained during the cross-validation routine:
+
+```{r fit_final_svm, warning = FALSE, message = FALSE, cache=TRUE}
+svm_final_grid <- expand.grid(C = 32, sigma = 0.1)
+fit_final_svm <- train(classe ~ ., data = tidy_train,
+                       method = "svmRadial",
+                       tuneGrid = svm_final_grid,
+                       preProc = c("center", "scale"),
+                       verbose = FALSE)
+```
+
+```{r fit_final_rf, warning = FALSE, message = FALSE, cache=TRUE}
+rf_final_grid <- expand.grid(mtry = 16)
+fit_final_rf <- train(classe ~ ., data = tidy_train,
+                      method = "rf",
+                      tuneGrid = rf_final_grid)
+```
+
+```{r fit_final_gbm, warning = FALSE, message = FALSE, cache=TRUE}
+gbm_final_grid <- expand.grid(interaction.depth = 15,
+                              n.trees = 100,
+                              shrinkage = 0.1,
+                              n.minobsinnode = 20)
+fit_final_gbm <- train(classe ~ ., data = tidy_train,
+                       method = "gbm",
+                       tuneGrid = gbm_final_grid,
+                       verbose = FALSE)
+```
+
+Final prediction was done on the testing dataset (tidy_tedt). As we can see, all three classifiers showed the equal classification results:  
+
+```{r, warning = FALSE, message = FALSE, }
+final_predict_svm <- predict(fit_final_svm, tidy_test)
+final_predict_rf <- predict(fit_final_rf, tidy_test)
+final_predict_gbm <- predict(fit_final_gbm, tidy_test)
+
+final_predict_svm
+final_predict_rf
+final_predict_gbm
+```
+
+## 5. Conclusion
+
+All fitted models - Support Vector Machine, Random Forest, and Gradient Boosting showed good and consistent results on the testing dataset in terms of classification accuracy. The best accuracy was obtained on the Support Vector Machine model.
+
+During the computational experiment the top limit of Gradient Boosting classification quality was not reached. This means that GBM can be fitted potentially better, but it will require substantially more resources (time and memory) for fitting.
