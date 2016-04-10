@@ -309,3 +309,4 @@ final_predict_gbm
 All fitted models - Support Vector Machine, Random Forest, and Gradient Boosting showed good and consistent results on the testing dataset in terms of classification accuracy. The best accuracy was obtained on the Support Vector Machine model.
 
 During the computational experiment the top limit of Gradient Boosting classification quality was not reached. This means that GBM can be fitted potentially better, but it will require substantially more resources (time and memory) for fitting.
+
